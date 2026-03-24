@@ -63,6 +63,29 @@ export default {
     const url = new URL(request.url);
     const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
+    // WebSocket check MUST come first (before path checks)
+    if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+      
+      log('info', 'WebSocket connected', { ip: clientIp });
+      
+      server.addEventListener('message', async (event: MessageEvent) => {
+        try {
+          const msg: NIP46Request = JSON.parse(event.data as string);
+          log('info', 'Request', { method: msg.method, ip: clientIp });
+          const result = await callOutlayer(env, msg.method, msg.params);
+          server.send(JSON.stringify({ id: msg.id, result, error: null }));
+        } catch (e) {
+          log('error', 'Request failed', { error: String(e), ip: clientIp });
+          server.send(JSON.stringify({ id: null, result: null, error: String(e) }));
+        }
+      });
+      
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     // Health check
     if (url.pathname === '/' || url.pathname === '/health') {
       return new Response(JSON.stringify({
@@ -132,6 +155,24 @@ export default {
       }
     }
 
+    // API: Get private key (requires auth - use carefully)
+    if (url.pathname === '/api/get_private_key' && request.method === 'POST') {
+      log('info', 'API: get_private_key', { ip: clientIp });
+      try {
+        const result = await callOutlayer(env, 'get_private_key', []);
+        log('info', 'Private key requested');
+        return new Response(JSON.stringify(result), { 
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        log('error', 'get_private_key failed', { error: String(e) });
+        return new Response(JSON.stringify({ error: String(e) }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
     // API: Sign event
     if (url.pathname === '/api/sign_event' && request.method === 'POST') {
       log('info', 'API: sign_event', { ip: clientIp });
@@ -174,7 +215,7 @@ export default {
       const accountId = url.pathname.split('/')[2] || 'unknown';
       const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize - ${accountId}</title>
 <style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea,#764ba2);margin:0}.box{background:#fff;border-radius:20px;padding:40px;max-width:500px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}button{width:100%;padding:16px;background:#007AFF;color:#fff;border:none;border-radius:12px;font-size:18px;cursor:pointer;margin-top:20px}button:disabled{background:#ccc;cursor:not-allowed}button.secondary{background:#34C759;margin-top:10px}#logs{text-align:left;font-size:12px;color:#666;margin-top:20px;max-height:200px;overflow-y:auto;background:#f5f5f5;padding:10px;border-radius:8px}#identity{background:#f0f8ff;padding:15px;border-radius:8px;margin-top:15px;text-align:left;font-size:14px}</style></head>
-<body><div class="box"><h1>🔐 Authorize Nostr</h1><p>Account: <b>${accountId}</b></p><button id="btn">Login with NEAR</button><button id="proofBtn" class="secondary" style="display:none">Publish Identity Proof</button><div id="identity" style="display:none"></div><p id="status"></p><div id="logs"></div></div></body>
+<body><div class="box"><h1>🔐 Authorize Nostr</h1><p>Account: <b>${accountId}</b></p><button id="btn">Login with NEAR</button><button id="proofBtn" class="secondary" style="display:none">Publish Identity Proof</button><div id="identity" style="display:none"></div><div id="keySection" style="display:none;margin-top:20px;padding-top:20px;border-top:1px solid #ddd"><h3>🔑 Export Private Key</h3><p style="font-size:13px;color:#666">For <a href="https://snort.social" target="_blank">snort.social</a> or other clients</p><button id="showKeyBtn" style="background:#FF9500">Show Private Key (⚠️)</button><div id="keyWarning" style="display:none;background:#fff3cd;padding:15px;border-radius:8px;margin:10px 0"><b>⚠️ WARNING</b><br><br>Your private key gives FULL access to your Nostr identity.<br>Never share it or enter it on untrusted websites.<br><br><button id="confirmShowKey" style="background:#dc3545">I understand - Show Key</button></div><div id="keyDisplay" style="display:none"></div></div><p id="status"></p><div id="logs"></div></div></body>
 <script type="module">
 import { NearConnector } from "https://esm.run/@hot-labs/near-connect";
 
@@ -220,8 +261,9 @@ connector.on("wallet:signIn", async (t) => {
       '<a href="' + data.verification_url + '" target="_blank">Verify on NEAR Social →</a>';
     identityDiv.style.display = 'block';
     
-    // Show proof button
+    // Show proof button and key section
     proofBtn.style.display = 'block';
+    document.getElementById('keySection').style.display = 'block';
     
     status.innerHTML = '<span style="color:green">✓ Authorized!</span>';
     btn.textContent = '✓ Done';
@@ -307,27 +349,47 @@ proofBtn.onclick = async () => {
     proofBtn.textContent = 'Publish Identity Proof';
   }
 };
+
+// Show private key button
+const showKeyBtn = document.getElementById('showKeyBtn');
+const keyWarning = document.getElementById('keyWarning');
+const keyDisplay = document.getElementById('keyDisplay');
+
+showKeyBtn.onclick = async () => {
+  keyWarning.style.display = 'block';
+  showKeyBtn.style.display = 'none';
+};
+
+document.getElementById('confirmShowKey').onclick = async () => {
+  keyWarning.style.display = 'none';
+  log('→ Getting private key...');
+  
+  try {
+    const res = await fetch('/api/get_private_key', { method: 'POST' });
+    const data = await res.json();
+    
+    if (data.error) throw new Error(data.error);
+    
+    log('✓ Private key retrieved');
+    
+    keyDisplay.innerHTML = 
+      '<div style="background:#fff3cd;padding:15px;border-radius:8px;margin:10px 0;border:2px solid #ffc107">' +
+      '<b>⚠️ PRIVATE KEY - NEVER SHARE!</b><br><br>' +
+      '<b>nsec:</b><br><code style="word-break:break-all;font-size:14px;background:#fff;padding:5px;display:block">' + data.nsec + '</code><br>' +
+      '<b>Hex:</b><br><code style="word-break:break-all;font-size:12px;background:#fff;padding:5px;display:block">' + data.private_key + '</code><br>' +
+      '<b style="color:red">⚠️ Anyone with this key can sign as you. Keep it secret!</b>' +
+      '</div>' +
+      '<p style="font-size:13px;color:#666">Copy this key and store it securely. Never share it with anyone or enter it on untrusted sites.</p>';
+    keyDisplay.style.display = 'block';
+    
+  } catch (e) {
+    log('✗ Error: ' + e.message);
+    keyDisplay.innerHTML = '<span style="color:red">Error: ' + e.message + '</span>';
+    keyDisplay.style.display = 'block';
+  }
+};
 </script></html>`;
       return new Response(html, { headers: { 'Content-Type': 'text/html' } });
-    }
-
-    // WebSocket for NIP-46
-    if (request.headers.get('Upgrade') === 'websocket') {
-      const pair = new WebSocketPair();
-      const [client, server] = Object.values(pair);
-      server.accept();
-      
-      server.addEventListener('message', async (event: MessageEvent) => {
-        try {
-          const msg: NIP46Request = JSON.parse(event.data as string);
-          const result = await callOutlayer(env, msg.method, msg.params);
-          server.send(JSON.stringify({ id: msg.id, result, error: null }));
-        } catch (e) {
-          server.send(JSON.stringify({ id: null, result: null, error: String(e) }));
-        }
-      });
-      
-      return new Response(null, { status: 101, webSocket: client });
     }
 
     return new Response('Not Found', { status: 404 });
