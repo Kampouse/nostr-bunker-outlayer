@@ -8,26 +8,12 @@ export interface Env {
   PAYMENT_KEY: string;
   RATE_LIMIT_MAX: string;
   RATE_LIMIT_WINDOW: string;
-  EMAIL_API_URL?: string;
 }
-
-const DEFAULT_EMAIL_API = 'https://api.outlayer.fastnear.com/call/zavodil.near/near-email';
 
 interface NIP46Request {
   id: number | string;
   method: string;
   params: any[];
-}
-
-interface OutlayerResponse {
-  call_id: string;
-  status: string;
-  output?: {
-    id: number;
-    result?: any;
-    error?: string;
-  };
-  error?: string;
 }
 
 function log(level: string, message: string, data?: any) {
@@ -41,19 +27,11 @@ async function callOutlayer(env: Env, method: string, params: any[]): Promise<an
     body: JSON.stringify({ input: { id: 1, method, params } }),
   });
   
-  if (!response.ok) {
-    throw new Error(`OutLayer HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`OutLayer HTTP ${response.status}`);
   
   const data = await response.json() as any;
-  
-  if (data.status !== 'completed' || !data.output) {
-    throw new Error(data.error || 'OutLayer execution failed');
-  }
-  
-  if (data.output.error) {
-    throw new Error(data.output.error);
-  }
+  if (data.status !== 'completed' || !data.output) throw new Error(data.error || 'OutLayer failed');
+  if (data.output.error) throw new Error(data.output.error);
   
   return data.output.result;
 }
@@ -63,22 +41,18 @@ export default {
     const url = new URL(request.url);
     const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
-    // WebSocket check MUST come first
+    // WebSocket
     if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       server.accept();
       
-      log('info', 'WebSocket connected', { ip: clientIp });
-      
       server.addEventListener('message', async (event: MessageEvent) => {
         try {
           const msg: NIP46Request = JSON.parse(event.data as string);
-          log('info', 'Request', { method: msg.method, ip: clientIp });
           const result = await callOutlayer(env, msg.method, msg.params);
           server.send(JSON.stringify({ id: msg.id, result, error: null }));
         } catch (e) {
-          log('error', 'Request failed', { error: String(e), ip: clientIp });
           server.send(JSON.stringify({ id: null, result: null, error: String(e) }));
         }
       });
@@ -86,100 +60,52 @@ export default {
       return new Response(null, { status: 101, webSocket: client });
     }
 
-    // Health check
+    // Health
     if (url.pathname === '/' || url.pathname === '/health') {
       return new Response(JSON.stringify({
         status: 'ok',
-        version: '3.0.0',
+        version: '3.1.0',
         service: 'NEAR + Nostr Bunker (Multi-User)',
         timestamp: new Date().toISOString(),
-        endpoints: {
-          websocket: `wss://${url.host}`,
-          auth: `https://${url.host}/auth/{account_id}`,
-          api: `https://${url.host}/api/{method}`
-        }
       }), { headers: { 'Content-Type': 'application/json' } });
     }
 
-    // API: Get public key
-    if (url.pathname === '/api/get_public_key' && request.method === 'POST') {
+    // API endpoints
+    if (url.pathname.startsWith('/api/')) {
       const body = await request.json() as any;
       const accountId = body.account_id || 'kampouse.near';
+      
       try {
-        const pubkey = await callOutlayer(env, 'get_public_key', [accountId]);
-        return new Response(JSON.stringify({ pubkey }), { 
-          headers: { 'Content-Type': 'application/json' } 
-        });
+        if (url.pathname === '/api/get_public_key') {
+          const pubkey = await callOutlayer(env, 'get_public_key', [accountId]);
+          return new Response(JSON.stringify({ pubkey }), { headers: { 'Content-Type': 'application/json' } });
+        }
+        
+        if (url.pathname === '/api/get_identity') {
+          const identity = await callOutlayer(env, 'get_identity', [accountId]);
+          return new Response(JSON.stringify(identity), { headers: { 'Content-Type': 'application/json' } });
+        }
+        
+        if (url.pathname === '/api/get_private_key') {
+          log('info', 'Private key requested', { account_id: accountId, ip: clientIp });
+          const result = await callOutlayer(env, 'get_private_key', [accountId]);
+          return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+        }
+        
+        if (url.pathname === '/api/create_identity_proof') {
+          const proof = await callOutlayer(env, 'create_identity_proof', [accountId]);
+          return new Response(JSON.stringify(proof), { headers: { 'Content-Type': 'application/json' } });
+        }
+        
+        if (url.pathname === '/api/sign_event') {
+          const event = body.event || body;
+          const signedEvent = await callOutlayer(env, 'sign_event', [accountId, event]);
+          return new Response(JSON.stringify(signedEvent), { headers: { 'Content-Type': 'application/json' } });
+        }
+        
+        return new Response('Not Found', { status: 404 });
       } catch (e) {
-        return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500, headers: { 'Content-Type': 'application/json' } 
-        });
-      }
-    }
-
-    // API: Get identity
-    if (url.pathname === '/api/get_identity' && request.method === 'POST') {
-      const body = await request.json() as any;
-      const accountId = body.account_id || 'kampouse.near';
-      try {
-        const identity = await callOutlayer(env, 'get_identity', [accountId]);
-        return new Response(JSON.stringify(identity), { 
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500, headers: { 'Content-Type': 'application/json' } 
-        });
-      }
-    }
-
-    // API: Get private key
-    if (url.pathname === '/api/get_private_key' && request.method === 'POST') {
-      const body = await request.json() as any;
-      const accountId = body.account_id || 'kampouse.near';
-      log('info', 'Private key requested', { account_id: accountId, ip: clientIp });
-      try {
-        const result = await callOutlayer(env, 'get_private_key', [accountId]);
-        return new Response(JSON.stringify(result), { 
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500, headers: { 'Content-Type': 'application/json' } 
-        });
-      }
-    }
-
-    // API: Create identity proof
-    if (url.pathname === '/api/create_identity_proof' && request.method === 'POST') {
-      const body = await request.json() as any;
-      const accountId = body.account_id || 'kampouse.near';
-      try {
-        const proof = await callOutlayer(env, 'create_identity_proof', [accountId]);
-        return new Response(JSON.stringify(proof), { 
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500, headers: { 'Content-Type': 'application/json' } 
-        });
-      }
-    }
-
-    // API: Sign event
-    if (url.pathname === '/api/sign_event' && request.method === 'POST') {
-      const body = await request.json() as any;
-      const accountId = body.account_id || 'kampouse.near';
-      const event = body.event || body;
-      try {
-        const signedEvent = await callOutlayer(env, 'sign_event', [accountId, event]);
-        return new Response(JSON.stringify(signedEvent), { 
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500, headers: { 'Content-Type': 'application/json' } 
-        });
+        return new Response(JSON.stringify({ error: String(e) }), { status: 500, headers: { 'Content-Type': 'application/json' } });
       }
     }
 
@@ -197,6 +123,8 @@ const btn = document.getElementById('btn');
 const proofBtn = document.getElementById('proofBtn');
 const logs = document.getElementById('logs');
 const identityDiv = document.getElementById('identity');
+
+let currentAccount = '${accountId}';
 
 function log(msg) {
   const line = document.createElement('div');
@@ -218,7 +146,9 @@ connector.on("wallet:signIn", async (t) => {
     return;
   }
   
+  currentAccount = address;
   log('→ Getting identity...');
+  
   try {
     const res = await fetch('/api/get_identity', {
       method: 'POST',
@@ -268,11 +198,12 @@ proofBtn.onclick = async () => {
   proofBtn.disabled = true;
   proofBtn.textContent = 'Publishing...';
   log('→ Creating identity proof...');
+  
   try {
     const res = await fetch('/api/create_identity_proof', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: '${accountId}' })
+      body: JSON.stringify({ account_id: currentAccount })
     });
     const proof = await res.json();
     log('← Proof created');
@@ -280,7 +211,7 @@ proofBtn.onclick = async () => {
     const signRes = await fetch('/api/sign_event', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: '${accountId}', event: proof })
+      body: JSON.stringify({ account_id: currentAccount, event: proof })
     });
     const signed = await signRes.json();
     
@@ -331,7 +262,7 @@ document.getElementById('confirmShowKey').onclick = async () => {
     const res = await fetch('/api/get_private_key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ account_id: '${accountId}' })
+      body: JSON.stringify({ account_id: currentAccount })
     });
     const data = await res.json();
     
