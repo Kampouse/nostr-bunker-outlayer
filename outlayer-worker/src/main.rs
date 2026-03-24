@@ -1,10 +1,43 @@
+//! Nostr Bunker - OutLayer TEE Worker with v1.signer MPC
+//! 
+//! Architecture:
+//! ┌─────────────────────┐
+//! │ OutLayer TEE        │
+//! │ ┌───────────────┐   │
+//! │ │ WASM Code     │   │
+//! │ │ - Derive keys │   │
+//! │ │ - Calc event  │   │
+//! │ │ - HTTP to RPC ├───┼──→ NEAR RPC
+//! │ └───────────────┘   │
+//! └─────────────────────┘
+//!            │
+//!            ▼
+//! ┌───────────────┐
+//! │ v1.signer     │
+//! │ (MPC contract)│
+//! └───────┬───────┘
+//!         │
+//!         ▼
+//! ┌───────────────┐
+//! │ MPC Network   │
+//! │ (threshold)   │
+//! │ signs event   │
+//! └───────────────┘
+
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================
-// TYPE DEFINITIONS
+// Configuration
+// ============================================
+
+const NEAR_RPC_URL: &str = "https://rpc.mainnet.near.org";
+const V1_SIGNER_CONTRACT: &str = "v1.signer";
+
+// ============================================
+// Type Definitions
 // ============================================
 
 #[derive(Deserialize, Debug)]
@@ -43,32 +76,42 @@ struct SignedEvent {
     sig: String,
 }
 
-// Session management
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Session {
-    account_id: String,
-    created_at: u64,
-    expires_at: u64,
-    token: String,
+#[derive(Serialize)]
+struct NearRpcRequest {
+    jsonrpc: String,
+    id: String,
+    method: String,
+    params: serde_json::Value,
 }
 
-// NIP-04 encrypted message
-#[derive(Serialize, Deserialize, Debug)]
-struct EncryptedMessage {
-    ciphertext: String,
-    nonce: String,
-    ephemeral_key: String,
+#[derive(Deserialize)]
+struct NearRpcResponse {
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<NearRpcError>,
+}
+
+#[derive(Deserialize)]
+struct NearRpcError {
+    message: String,
+}
+
+#[derive(Serialize)]
+struct SignRequest {
+    domain: u8,
+    path: String,
+    payload: String,
 }
 
 // ============================================
-// GLOBAL STATE (In production, use OutLayer storage)
+// Global State
 // ============================================
 
-static mut SESSIONS: Option<HashMap<String, Session>> = None;
-static mut PUBKEY_CACHE: Option<HashMap<String, (String, u64)>> = None;
+static mut SESSIONS: Option<HashMap<String, String>> = None;
 
 // ============================================
-// MAIN ENTRY POINT
+// Main Entry Point
 // ============================================
 
 fn main() {
@@ -91,86 +134,59 @@ fn main() {
 }
 
 // ============================================
-// REQUEST HANDLER
+// Request Handler
 // ============================================
 
-fn handle_request() -> Result<String, Box<dyn std::error::Error>> {
+fn handle_request() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
 
     let request: Request = serde_json::from_str(input.trim())?;
-
-    // Get account ID from environment
     let account_id = get_account_id();
 
-    // Log request (monitoring)
     log_audit(&format!("Request: {}", request.method), &account_id);
 
     match request.method.as_str() {
-        "connect" | "get_public_key" => {
-            let pubkey = derive_nostr_pubkey(&account_id)?;
-            Ok(pubkey)
+        "ping" => Ok(serde_json::json!({
+            "version": "4.0.0",
+            "methods": ["ping", "get_public_key", "get_identity", "sign_event", "create_session"],
+            "signing": "v1.signer MPC",
+            "tee": "OutLayer"
+        })),
+
+        "get_public_key" => {
+            let pubkey = get_derived_public_key(&account_id)?;
+            Ok(serde_json::json!(pubkey))
+        }
+
+        "get_identity" => {
+            let pubkey = get_derived_public_key(&account_id)?;
+            Ok(serde_json::json!({
+                "near_account": account_id,
+                "nostr_pubkey": pubkey,
+                "mpc_path": format!("nostr/{}", account_id),
+                "mpc_contract": V1_SIGNER_CONTRACT
+            }))
+        }
+
+        "create_session" => {
+            let token = create_session(&account_id);
+            Ok(serde_json::json!({
+                "token": token,
+                "account_id": account_id,
+                "expires_in": 86400 * 30
+            }))
         }
 
         "sign_event" => {
-            // Check authentication
-            if !is_authenticated(&account_id) {
-                return Err("Not authenticated. Call create_session first.".into());
-            }
+            let event: NostrEvent = request.params.get(0)
+                .ok_or("Missing event parameter")?
+                .clone()
+                .try_into()
+                .map_err(|e: serde_json::Error| format!("Invalid event: {}", e))?;
 
-            let event: NostrEvent = serde_json::from_value(
-                request.params.get(0)
-                    .ok_or("Missing event parameter")?
-                    .clone()
-            ).map_err(|e| format!("Invalid event: {}", e))?;
-
-            let signed = sign_nostr_event(&account_id, &event)?;
-            Ok(serde_json::to_string(&signed)?)
-        }
-
-        // Session management
-        "create_session" => {
-            let session = create_session(&account_id)?;
-            Ok(serde_json::to_string(&session)?)
-        }
-
-        "validate_session" => {
-            let token = request.params.get(0)
-                .and_then(|v| v.as_str())
-                .ok_or("Missing token parameter")?;
-
-            let valid = validate_session(&account_id, token);
-            Ok(serde_json::to_string(&serde_json::json!({ "valid": valid }))?)
-        }
-
-        "revoke_session" => {
-            revoke_session(&account_id);
-            Ok(serde_json::to_string(&serde_json::json!({ "revoked": true }))?)
-        }
-
-        // NIP-04 encryption/decryption
-        "nip04_encrypt" => {
-            let pubkey = request.params.get(0)
-                .and_then(|v| v.as_str())
-                .ok_or("Missing pubkey parameter")?;
-            let plaintext = request.params.get(1)
-                .and_then(|v| v.as_str())
-                .ok_or("Missing plaintext parameter")?;
-
-            let encrypted = nip04_encrypt(&account_id, pubkey, plaintext)?;
-            Ok(serde_json::to_string(&encrypted)?)
-        }
-
-        "nip04_decrypt" => {
-            let pubkey = request.params.get(0)
-                .and_then(|v| v.as_str())
-                .ok_or("Missing pubkey parameter")?;
-            let ciphertext = request.params.get(1)
-                .and_then(|v| v.as_str())
-                .ok_or("Missing ciphertext parameter")?;
-
-            let decrypted = nip04_decrypt(&account_id, pubkey, ciphertext)?;
-            Ok(decrypted)
+            let signed = sign_event(&account_id, &event)?;
+            Ok(serde_json::to_value(signed)?)
         }
 
         _ => Err(format!("Unknown method: {}", request.method).into())
@@ -178,55 +194,53 @@ fn handle_request() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 // ============================================
-// KEY DERIVATION & SIGNING
+// v1.signer MPC Integration
 // ============================================
 
-fn derive_nostr_pubkey(account_id: &str) -> Result<String, Box<dyn std::error::Error>> {
-    // Check cache first
-    if let Some(cached) = get_cached_pubkey(account_id) {
-        return Ok(cached);
-    }
-
-    // Sanitize account ID
-    let account_id = sanitize_account_id(account_id)?;
-
-    // In production: Call v1.signer.derived_public_key via NEAR RPC
-    // For now: Deterministic derivation
-    let derivation_path = format!("nostr/{}", account_id);
-    let mut hasher = Sha256::new();
-    hasher.update(derivation_path.as_bytes());
-    let pubkey = hex::encode(hasher.finalize());
-
-    // Cache for 1 hour
-    cache_pubkey(&account_id, &pubkey, 3600);
-
-    Ok(pubkey)
+fn get_derived_public_key(account_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let args = serde_json::json!({
+        "domain": 0,
+        "path": format!("nostr/{}", account_id),
+    });
+    
+    let result = call_near_view(V1_SIGNER_CONTRACT, "derived_public_key", &args)?;
+    
+    // Parse bytes to string
+    let bytes: Vec<u8> = serde_json::from_value(result)?;
+    let pubkey = String::from_utf8(bytes)?;
+    
+    Ok(pubkey.trim_matches('"').to_string())
 }
 
-fn sign_nostr_event(account_id: &str, event: &NostrEvent) -> Result<SignedEvent, Box<dyn std::error::Error>> {
-    // 1. Serialize event (NIP-01)
-    let serialized = serialize_event(event);
-
-    // 2. Hash with SHA-256
+fn sign_event(account_id: &str, event: &NostrEvent) -> Result<SignedEvent, Box<dyn std::error::Error>> {
+    // 1. Calculate event ID (NIP-01)
+    let serialized = format!(
+        "[0,\"{}\",{},{},\"{}\"]",
+        event.pubkey,
+        event.created_at,
+        event.kind,
+        serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string()),
+        event.content
+    );
+    
     let mut hasher = Sha256::new();
     hasher.update(serialized.as_bytes());
     let event_id = hex::encode(hasher.finalize());
-
-    // 3. Get relayer credentials
-    let relayer_id = std::env::var("RELAYER_ACCOUNT_ID")
-        .unwrap_or_else(|_| "relayer.near".to_string());
-    let relayer_key = std::env::var("RELAYER_PRIVATE_KEY")
-        .unwrap_or_else(|_| "".to_string());
-
-    // 4. Sign via v1.signer (placeholder for NEAR RPC call)
-    let signature = if relayer_key.is_empty() {
-        // Fallback: placeholder signature
-        format!("sig_{}_{}", event_id, account_id)
-    } else {
-        // Production: Call v1.signer via NEAR RPC
-        call_v1_signer(&relayer_id, &relayer_key, account_id, &event_id)?
-    };
-
+    
+    // 2. Call v1.signer MPC
+    let args = serde_json::json!({
+        "domain": 0,
+        "path": format!("nostr/{}", account_id),
+        "payload": event_id,
+    });
+    
+    let result = call_near_view(V1_SIGNER_CONTRACT, "sign", &args)?;
+    
+    // 3. Parse signature
+    let bytes: Vec<u8> = serde_json::from_value(result)?;
+    let sig = String::from_utf8(bytes)?;
+    
+    // 4. Return signed event
     Ok(SignedEvent {
         id: event_id,
         pubkey: event.pubkey.clone(),
@@ -234,183 +248,118 @@ fn sign_nostr_event(account_id: &str, event: &NostrEvent) -> Result<SignedEvent,
         kind: event.kind,
         tags: event.tags.clone(),
         content: event.content.clone(),
-        sig: signature,
+        sig,
     })
 }
 
-fn call_v1_signer(
-    relayer_id: &str,
-    _relayer_key: &str,
-    account_id: &str,
-    event_id: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    // TODO: Implement actual NEAR RPC call
-    // This would use the near-sdk or JSON-RPC client
-    //
-    // Example (pseudocode):
-    // let response = near_rpc::call(
-    //     relayer_id,
-    //     relayer_key,
-    //     "v1.signer",
-    //     "sign",
-    //     json!({
-    //         "domain": 0,
-    //         "path": format!("nostr/{}", account_id),
-    //         "payload": event_id,
-    //     }),
-    //     "0",  // deposit
-    //     "30000000000000",  // gas
-    //     "FINAL",
-    // )?;
+// ============================================
+// NEAR RPC Client
+// ============================================
 
-    // For now: return placeholder
-    Ok(format!("sig_{}_{}", event_id, relayer_id))
+fn call_near_view(
+    contract_id: &str,
+    method: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let args_base64 = base64_encode(&serde_json::to_string(args)?);
+    
+    let request = NearRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: "dontcare".to_string(),
+        method: "query".to_string(),
+        params: serde_json::json!({
+            "request_type": "call_function",
+            "finality": "final",
+            "account_id": contract_id,
+            "method_name": method,
+            "args_base64": args_base64,
+        }),
+    };
+    
+    let body = serde_json::to_string(&request)?;
+    let response = http_post(NEAR_RPC_URL, &body)?;
+    
+    let rpc_response: NearRpcResponse = serde_json::from_str(&response)?;
+    
+    if let Some(error) = rpc_response.error {
+        return Err(format!("NEAR RPC error: {}", error.message).into());
+    }
+    
+    rpc_response.result
+        .map(|r| r["result"].clone())
+        .ok_or_else(|| "No result in response".into())
 }
 
 // ============================================
-// SESSION MANAGEMENT
+// HTTP Client
 // ============================================
 
-fn create_session(account_id: &str) -> Result<Session, Box<dyn std::error::Error>> {
+#[cfg(target_arch = "wasm32")]
+fn http_post(url: &str, body: &str) -> Result<String, String> {
+    // OutLayer provides HTTP via host function
+    // Call signature: outlayer_http_post(url: ptr, url_len: u32, body: ptr, body_len: u32) -> ptr
+    
+    // This is a placeholder - the actual implementation would be:
+    // #[link(wasm_import_module = "outlayer")]
+    // extern "C" {
+    //     fn http_post(url: *const u8, url_len: u32, body: *const u8, body_len: u32, out: *mut u8, out_len: *mut u32) -> u32;
+    // }
+    
+    // For now, return error indicating deployment needed
+    Err("Deploy to OutLayer TEE for HTTP support. Local WASM cannot make HTTP requests.".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http_post(url: &str, body: &str) -> Result<String, String> {
+    use std::process::Command;
+    
+    let output = Command::new("curl")
+        .args([
+            "-s", "-X", "POST",
+            "-H", "Content-Type: application/json",
+            "-d", body,
+            url
+        ])
+        .output()
+        .map_err(|e| format!("curl failed: {}", e))?;
+    
+    if output.status.success() {
+        String::from_utf8(output.stdout)
+            .map_err(|e| format!("Invalid UTF-8: {}", e))
+    } else {
+        Err(format!("curl error: {}", String::from_utf8_lossy(&output.stderr)))
+    }
+}
+
+// ============================================
+// Session Management
+// ============================================
+
+fn create_session(account_id: &str) -> String {
     let now = current_timestamp();
-    let expires_at = now + (30 * 24 * 60 * 60); // 30 days
-
-    // Generate secure token
     let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}:{}:{}", account_id, now, rand_u64(), "secret_salt"));
+    hasher.update(format!("{}:{}:session", account_id, now));
     let token = hex::encode(hasher.finalize());
-
-    let session = Session {
-        account_id: account_id.to_string(),
-        created_at: now,
-        expires_at,
-        token: token.clone(),
-    };
-
-    // Store session
+    
     unsafe {
         if SESSIONS.is_none() {
             SESSIONS = Some(HashMap::new());
         }
         if let Some(ref mut sessions) = SESSIONS {
-            sessions.insert(account_id.to_string(), session.clone());
+            sessions.insert(account_id.to_string(), token.clone());
         }
     }
-
-    log_audit(&format!("Session created, expires {}", expires_at), account_id);
-
-    Ok(session)
-}
-
-fn validate_session(account_id: &str, token: &str) -> bool {
-    unsafe {
-        if let Some(ref sessions) = SESSIONS {
-            if let Some(session) = sessions.get(account_id) {
-                return session.token == token && session.expires_at > current_timestamp();
-            }
-        }
-    }
-    false
-}
-
-fn revoke_session(account_id: &str) {
-    unsafe {
-        if let Some(ref mut sessions) = SESSIONS {
-            sessions.remove(account_id);
-        }
-    }
-    log_audit("Session revoked", account_id);
-}
-
-fn is_authenticated(account_id: &str) -> bool {
-    // In production, check for valid session
-    // For now, return true (no auth required for basic usage)
-    true
+    
+    token
 }
 
 // ============================================
-// NIP-04 ENCRYPTION/DECRYPTION
-// ============================================
-
-fn nip04_encrypt(
-    _account_id: &str,
-    pubkey: &str,
-    plaintext: &str,
-) -> Result<EncryptedMessage, Box<dyn std::error::Error>> {
-    // TODO: Implement actual encryption using x25519-dalek + AES-GCM
-    //
-    // Steps:
-    // 1. Generate ephemeral key pair
-    // 2. Compute shared secret via X25519
-    // 3. Encrypt plaintext with AES-256-GCM
-    // 4. Return: ciphertext, nonce, ephemeral_pubkey
-
-    // For now: return placeholder
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}:{}", pubkey, plaintext, rand_u64()));
-    let ciphertext = hex::encode(hasher.finalize());
-
-    Ok(EncryptedMessage {
-        ciphertext,
-        nonce: "0123456789abcdef".to_string(),
-        ephemeral_key: pubkey.to_string(),
-    })
-}
-
-fn nip04_decrypt(
-    _account_id: &str,
-    _pubkey: &str,
-    ciphertext: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    // TODO: Implement actual decryption
-    //
-    // Steps:
-    // 1. Parse ciphertext, nonce, ephemeral_pubkey
-    // 2. Compute shared secret via X25519
-    // 3. Decrypt with AES-256-GCM
-    // 4. Return plaintext
-
-    // For now: return placeholder
-    Ok(format!("decrypted_{}", ciphertext))
-}
-
-// ============================================
-// CACHING
-// ============================================
-
-fn cache_pubkey(account_id: &str, pubkey: &str, ttl_seconds: u64) {
-    let expires_at = current_timestamp() + ttl_seconds;
-
-    unsafe {
-        if PUBKEY_CACHE.is_none() {
-            PUBKEY_CACHE = Some(HashMap::new());
-        }
-        if let Some(ref mut cache) = PUBKEY_CACHE {
-            cache.insert(account_id.to_string(), (pubkey.to_string(), expires_at));
-        }
-    }
-}
-
-fn get_cached_pubkey(account_id: &str) -> Option<String> {
-    unsafe {
-        if let Some(ref cache) = PUBKEY_CACHE {
-            if let Some((pubkey, expires_at)) = cache.get(account_id) {
-                if *expires_at > current_timestamp() {
-                    return Some(pubkey.clone());
-                }
-            }
-        }
-    }
-    None
-}
-
-// ============================================
-// UTILITY FUNCTIONS
+// Utility Functions
 // ============================================
 
 fn get_account_id() -> String {
     std::env::var("NEAR_ACCOUNT_ID")
-        .unwrap_or_else(|_| "alice.near".to_string())
+        .unwrap_or_else(|_| "kampouse.near".to_string())
 }
 
 fn current_timestamp() -> u64 {
@@ -420,30 +369,28 @@ fn current_timestamp() -> u64 {
         .as_secs()
 }
 
-fn rand_u64() -> u64 {
-    // Simple pseudo-random (in production, use proper RNG)
-    current_timestamp().wrapping_mul(2654435761)
-}
-
-fn serialize_event(event: &NostrEvent) -> String {
-    format!(
-        "[0,\"{}\",{},{},{},\"{}\"]",
-        event.pubkey,
-        event.created_at,
-        event.kind,
-        serde_json::to_string(&event.tags).unwrap_or_else(|_| "[]".to_string()),
-        event.content
-    )
-}
-
-fn sanitize_account_id(account_id: &str) -> Result<String, Box<dyn std::error::Error>> {
-    if account_id.len() > 64 {
-        return Err("Account ID too long".into());
+fn base64_encode(input: &str) -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = input.as_bytes();
+    let mut result = String::new();
+    
+    for chunk in bytes.chunks(3) {
+        let mut n = 0u32;
+        for (i, &byte) in chunk.iter().enumerate() {
+            n |= (byte as u32) << (16 - i * 8);
+        }
+        
+        for i in 0..4 {
+            if i * 6 < chunk.len() * 8 + 8 {
+                let idx = ((n >> (18 - i * 6)) & 0x3F) as usize;
+                result.push(CHARSET[idx] as char);
+            } else {
+                result.push('=');
+            }
+        }
     }
-    if !account_id.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_') {
-        return Err("Invalid characters in account ID".into());
-    }
-    Ok(account_id.to_string())
+    
+    result
 }
 
 fn log_audit(event: &str, account_id: &str) {
@@ -451,7 +398,7 @@ fn log_audit(event: &str, account_id: &str) {
 }
 
 // ============================================
-// TESTS
+// Tests
 // ============================================
 
 #[cfg(test)]
@@ -459,87 +406,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_derive_pubkey() {
-        let pubkey = derive_nostr_pubkey("alice.near").unwrap();
-        assert_eq!(pubkey.len(), 64);
-
-        let pubkey2 = derive_nostr_pubkey("alice.near").unwrap();
-        assert_eq!(pubkey, pubkey2);
-
-        let pubkey3 = derive_nostr_pubkey("bob.near").unwrap();
-        assert_ne!(pubkey, pubkey3);
+    fn test_base64() {
+        assert_eq!(base64_encode("hello"), "aGVsbG8=");
+        assert_eq!(base64_encode("{\"test\":1}"), "eyJ0ZXN0IjoxfQ==");
     }
 
     #[test]
-    fn test_session_creation() {
-        let session = create_session("alice.near").unwrap();
-        assert!(session.token.len() == 64);
-        assert!(session.expires_at > session.created_at);
-    }
-
-    #[test]
-    fn test_session_validation() {
-        let session = create_session("alice.near").unwrap();
-        assert!(validate_session("alice.near", &session.token));
-        assert!(!validate_session("alice.near", "invalid_token"));
-    }
-
-    #[test]
-    fn test_session_revocation() {
-        let session = create_session("bob.near").unwrap();
-        assert!(validate_session("bob.near", &session.token));
-        revoke_session("bob.near");
-        assert!(!validate_session("bob.near", &session.token));
-    }
-
-    #[test]
-    fn test_serialize_event() {
-        let event = NostrEvent {
-            pubkey: "abc123".to_string(),
-            created_at: 1234567890,
-            kind: 1,
-            tags: vec![],
-            content: "Hello!".to_string(),
-        };
-
-        let serialized = serialize_event(&event);
-        assert!(serialized.starts_with("[0,"));
-        assert!(serialized.contains("abc123"));
-    }
-
-    #[test]
-    fn test_sign_event() {
-        let event = NostrEvent {
-            pubkey: "abc123".to_string(),
-            created_at: 1234567890,
-            kind: 1,
-            tags: vec![],
-            content: "Hello!".to_string(),
-        };
-
-        let signed = sign_nostr_event("alice.near", &event).unwrap();
-        assert_eq!(signed.id.len(), 64);
-        assert!(signed.sig.starts_with("sig_"));
-    }
-
-    #[test]
-    fn test_nip04_encrypt() {
-        let encrypted = nip04_encrypt("alice.near", "bob_pubkey", "Hello!").unwrap();
-        assert!(!encrypted.ciphertext.is_empty());
-        assert!(!encrypted.nonce.is_empty());
-    }
-
-    #[test]
-    fn test_sanitize_account_id() {
-        assert!(sanitize_account_id("alice.near").is_ok());
-        assert!(sanitize_account_id("a".repeat(65).as_str()).is_err());
-        assert!(sanitize_account_id("invalid@account").is_err());
-    }
-
-    #[test]
-    fn test_pubkey_caching() {
-        let pubkey1 = derive_nostr_pubkey("cache_test.near").unwrap();
-        let pubkey2 = get_cached_pubkey("cache_test.near").unwrap();
-        assert_eq!(pubkey1, pubkey2);
+    fn test_session() {
+        let token = create_session("test.near");
+        assert_eq!(token.len(), 64);
     }
 }
