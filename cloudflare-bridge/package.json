@@ -1,0 +1,26 @@
+{
+  "name": "nostr-bunker-bridge",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker bridge for NEAR + Nostr bunker",
+  "main": "src/worker.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "wrangler dev --local"
+  },
+  "keywords": [
+    "nostr",
+    "near",
+    "cloudflare-workers",
+    "websocket",
+    "bridge"
+  ],
+  "author": "Kampouse",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.24.0"
+  }
+}
