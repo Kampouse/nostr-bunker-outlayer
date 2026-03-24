@@ -96,6 +96,61 @@ export default {
       }
     }
 
+    // API: Get identity
+    if (url.pathname === '/api/get_identity' && request.method === 'POST') {
+      log('info', 'API: get_identity', { ip: clientIp });
+      try {
+        const identity = await callOutlayer(env, 'get_identity', []);
+        log('info', 'Got identity', { near: identity.near_account });
+        return new Response(JSON.stringify(identity), { 
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        log('error', 'get_identity failed', { error: String(e) });
+        return new Response(JSON.stringify({ error: String(e) }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
+    // API: Create identity proof (NIP-39)
+    if (url.pathname === '/api/create_identity_proof' && request.method === 'POST') {
+      log('info', 'API: create_identity_proof', { ip: clientIp });
+      try {
+        const proof = await callOutlayer(env, 'create_identity_proof', []);
+        log('info', 'Created identity proof');
+        return new Response(JSON.stringify(proof), { 
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        log('error', 'create_identity_proof failed', { error: String(e) });
+        return new Response(JSON.stringify({ error: String(e) }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
+    // API: Sign event
+    if (url.pathname === '/api/sign_event' && request.method === 'POST') {
+      log('info', 'API: sign_event', { ip: clientIp });
+      try {
+        const body = await request.json();
+        const signedEvent = await callOutlayer(env, 'sign_event', [body]);
+        log('info', 'Event signed', { eventId: signedEvent.id?.slice(0, 16) });
+        return new Response(JSON.stringify(signedEvent), { 
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        log('error', 'sign_event failed', { error: String(e) });
+        return new Response(JSON.stringify({ error: String(e) }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
     // API: Create session
     if (url.pathname === '/api/create_session' && request.method === 'POST') {
       log('info', 'API: create_session', { ip: clientIp });
@@ -118,20 +173,21 @@ export default {
     if (url.pathname.startsWith('/auth/')) {
       const accountId = url.pathname.split('/')[2] || 'unknown';
       const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize - ${accountId}</title>
-<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea,#764ba2);margin:0}.box{background:#fff;border-radius:20px;padding:40px;max-width:450px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}button{width:100%;padding:16px;background:#007AFF;color:#fff;border:none;border-radius:12px;font-size:18px;cursor:pointer;margin-top:20px}button:disabled{background:#ccc;cursor:not-allowed}#logs{text-align:left;font-size:12px;color:#666;margin-top:20px;max-height:200px;overflow-y:auto;background:#f5f5f5;padding:10px;border-radius:8px}</style></head>
-<body><div class="box"><h1>🔐 Authorize Nostr</h1><p>Account: <b>${accountId}</b></p><button id="btn">Login with NEAR</button><p id="status"></p><div id="logs"></div></div></body>
+<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea,#764ba2);margin:0}.box{background:#fff;border-radius:20px;padding:40px;max-width:500px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}button{width:100%;padding:16px;background:#007AFF;color:#fff;border:none;border-radius:12px;font-size:18px;cursor:pointer;margin-top:20px}button:disabled{background:#ccc;cursor:not-allowed}button.secondary{background:#34C759;margin-top:10px}#logs{text-align:left;font-size:12px;color:#666;margin-top:20px;max-height:200px;overflow-y:auto;background:#f5f5f5;padding:10px;border-radius:8px}#identity{background:#f0f8ff;padding:15px;border-radius:8px;margin-top:15px;text-align:left;font-size:14px}</style></head>
+<body><div class="box"><h1>🔐 Authorize Nostr</h1><p>Account: <b>${accountId}</b></p><button id="btn">Login with NEAR</button><button id="proofBtn" class="secondary" style="display:none">Publish Identity Proof</button><div id="identity" style="display:none"></div><p id="status"></p><div id="logs"></div></div></body>
 <script type="module">
 import { NearConnector } from "https://esm.run/@hot-labs/near-connect";
 
 const status = document.getElementById('status');
 const btn = document.getElementById('btn');
+const proofBtn = document.getElementById('proofBtn');
 const logs = document.getElementById('logs');
+const identityDiv = document.getElementById('identity');
 
 function log(msg) {
   const line = document.createElement('div');
   line.textContent = new Date().toLocaleTimeString() + ' - ' + msg;
   logs.appendChild(line);
-  console.log(msg);
 }
 
 log('Page loaded');
@@ -148,35 +204,32 @@ connector.on("wallet:signIn", async (t) => {
     return;
   }
   
-  log('→ Getting pubkey...');
+  log('→ Getting identity...');
   try {
-    const res = await fetch('/api/get_public_key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
-    });
-    log('← Status: ' + res.status);
+    const res = await fetch('/api/get_identity', { method: 'POST' });
     const data = await res.json();
-    log('← Data: ' + JSON.stringify(data));
+    log('← Identity loaded');
     
     if (data.error) throw new Error(data.error);
     
-    log('✓ Pubkey: ' + data.pubkey.slice(0, 16) + '...');
+    // Show identity info
+    identityDiv.innerHTML = '<b>Your Nostr Identity:</b><br>' +
+      'npub: <code>' + data.nostr_npub + '</code><br>' +
+      'NEAR: <code>' + data.near_account + '</code><br>' +
+      '<a href="' + data.verification_url + '" target="_blank">Verify on NEAR Social →</a>';
+    identityDiv.style.display = 'block';
     
-    log('→ Creating session...');
-    const sres = await fetch('/api/create_session', { method: 'POST' });
-    const sdata = await sres.json();
-    log('← Session: ' + JSON.stringify(sdata));
+    // Show proof button
+    proofBtn.style.display = 'block';
     
-    status.innerHTML = '<span style="color:green">✓ Authorized!<br>Pubkey: ' + data.pubkey.slice(0, 20) + '...</span>';
+    status.innerHTML = '<span style="color:green">✓ Authorized!</span>';
     btn.textContent = '✓ Done';
     
-    setTimeout(() => window.close(), 2000);
+    log('✓ Ready');
   } catch (e) {
     log('✗ Error: ' + e.message);
     status.innerHTML = '<span style="color:red">Error: ' + e.message + '</span>';
     btn.disabled = false;
-    btn.textContent = 'Login with NEAR';
   }
 });
 
@@ -191,6 +244,66 @@ btn.onclick = async () => {
     status.innerHTML = '<span style="color:red">Error: ' + e.message + '</span>';
     btn.disabled = false;
     btn.textContent = 'Login with NEAR';
+  }
+};
+
+proofBtn.onclick = async () => {
+  proofBtn.disabled = true;
+  proofBtn.textContent = 'Publishing...';
+  log('→ Creating NIP-39 identity proof...');
+  try {
+    const res = await fetch('/api/create_identity_proof', { method: 'POST' });
+    const proof = await res.json();
+    log('← Proof created');
+    
+    // Sign the event via bunker
+    log('→ Signing event...');
+    const signRes = await fetch('/api/sign_event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(proof)
+    });
+    const signed = await signRes.json();
+    
+    if (signed.error) throw new Error(signed.error);
+    log('← Event signed');
+    
+    // Publish to relays
+    log('→ Publishing to Nostr relays...');
+    const relays = [
+      'wss://nostr-relay-production.up.railway.app',
+      'wss://relay.damus.io',
+      'wss://nos.lol'
+    ];
+    
+    let published = 0;
+    for (const relay of relays) {
+      try {
+        const ws = new WebSocket(relay);
+        await new Promise((resolve, reject) => {
+          ws.onopen = () => {
+            ws.send(JSON.stringify(['EVENT', signed]));
+            log('  → Published to ' + relay);
+            published++;
+            setTimeout(() => { ws.close(); resolve(true); }, 500);
+          };
+          ws.onerror = () => resolve(false);
+          setTimeout(() => { ws.close(); resolve(false); }, 2000);
+        });
+      } catch (e) {
+        log('  ✗ Failed: ' + relay);
+      }
+    }
+    
+    status.innerHTML = '<span style="color:green">✓ Identity published to ' + published + ' relays!<br>Your NEAR ↔ Nostr link is now verifiable.</span>';
+    proofBtn.textContent = '✓ Published';
+    proofBtn.style.background = '#34C759';
+    
+    log('✓ Done - published to ' + published + ' relays');
+  } catch (e) {
+    log('✗ Error: ' + e.message);
+    proofBtn.disabled = false;
+    proofBtn.textContent = 'Publish Identity Proof';
   }
 };
 </script></html>`;
