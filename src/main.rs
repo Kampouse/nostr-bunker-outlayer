@@ -327,7 +327,7 @@ fn handle_sign_event(account_id: &str, event_value: &serde_json::Value, request_
             tags: event.tags,
             content: event.content,
             sig: signature,
-        })?),
+        }).map_err(|e| format!("Failed to serialize: {}", e))?),
         error: None,
     })
 }
@@ -469,17 +469,111 @@ fn send_near_transaction(
     args: &serde_json::Value,
     gas: u64,
     deposit: u64,
-    _private_key: &str,
+    private_key: &str,
 ) -> Result<serde_json::Value, String> {
-    // TODO: Implement actual transaction signing
-    // This requires:
-    // 1. Build transaction (nonce, block hash, actions)
-    // 2. Sign with ed25519 private key
-    // 3. Serialize to base64
-    // 4. Send via broadcast_tx_commit
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use near_crypto::{InMemorySigner, SecretKey};
+        use near_primitives::transaction::{Action, FunctionCallAction, TransactionV0, SignedTransaction};
+        use near_primitives::types::AccountId;
+        use near_primitives::hash::CryptoHash;
+        
+        // Parse private key
+        let secret_key: SecretKey = private_key.parse()
+            .map_err(|e: <SecretKey as std::str::FromStr>::Err| format!("Invalid private key: {:?}", e))?;
+        
+        let signer_account_id: AccountId = signer_id.parse()
+            .map_err(|e: <AccountId as std::str::FromStr>::Err| format!("Invalid signer account: {:?}", e))?;
+        
+        let signer = InMemorySigner::from_secret_key(signer_account_id.clone(), secret_key);
+        
+        // Get account nonce and block hash via RPC
+        let access_key = get_access_key(signer_id, &signer.public_key.to_string())?;
+        let nonce = access_key["nonce"].as_u64().unwrap_or(0) + 1;
+        let block_hash_str = access_key["block_hash"].as_str().unwrap_or("");
+        let block_hash: CryptoHash = block_hash_str.parse()
+            .map_err(|e: <CryptoHash as std::str::FromStr>::Err| format!("Invalid block hash: {:?}", e))?;
+        
+        // Build transaction
+        let receiver_account_id: AccountId = receiver_id.parse()
+            .map_err(|e: <AccountId as std::str::FromStr>::Err| format!("Invalid receiver account: {:?}", e))?;
+        
+        let args_bytes = serde_json::to_vec(args)
+            .map_err(|e| format!("Failed to serialize args: {}", e))?;
+        
+        let transaction = TransactionV0 {
+            signer_id: signer_account_id,
+            public_key: signer.public_key.clone(),
+            nonce,
+            receiver_id: receiver_account_id,
+            block_hash,
+            actions: vec![
+                Action::FunctionCall(Box::new(FunctionCallAction {
+                    method_name: method.to_string(),
+                    args: args_bytes,
+                    gas,
+                    deposit: deposit as u128,
+                }))
+            ],
+        };
+        
+        // Sign transaction
+        let signature = signer.sign(&borsh::to_vec(&transaction).unwrap());
+        let signed_tx = SignedTransaction::new(signature, near_primitives::transaction::Transaction::V0(transaction));
+        
+        // Serialize to base64
+        let tx_bytes = borsh::to_vec(&signed_tx)
+            .map_err(|e| format!("Failed to serialize transaction: {}", e))?;
+        let tx_base64 = base64_encode_bytes(&tx_bytes);
+        
+        // Send via RPC
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "dontcare",
+            "method": "broadcast_tx_commit",
+            "params": [tx_base64]
+        });
+        
+        let response = http_post(NEAR_RPC_URL, &serde_json::to_string(&request).unwrap())?;
+        let rpc_response: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        if let Some(error) = rpc_response.get("error") {
+            return Err(format!("Transaction failed: {}", error));
+        }
+        
+        Ok(rpc_response["result"].clone())
+    }
     
-    // For now, return error indicating implementation needed
-    Err("Transaction signing not yet implemented. Need to add ed25519 signing logic.".to_string())
+    #[cfg(target_arch = "wasm32")]
+    {
+        // WASM: Use OutLayer's transaction signing
+        Err("Transaction signing in WASM requires OutLayer host function".to_string())
+    }
+}
+
+fn get_access_key(account_id: &str, public_key: &str) -> Result<serde_json::Value, String> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dontcare",
+        "method": "query",
+        "params": {
+            "request_type": "view_access_key",
+            "finality": "final",
+            "account_id": account_id,
+            "public_key": public_key
+        }
+    });
+    
+    let response = http_post(NEAR_RPC_URL, &serde_json::to_string(&request).unwrap())?;
+    let rpc_response: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    
+    if let Some(error) = rpc_response.get("error") {
+        return Err(format!("Failed to get access key: {}", error));
+    }
+    
+    Ok(rpc_response["result"].clone())
 }
 
 // ============================================
@@ -569,8 +663,11 @@ fn current_timestamp() -> u64 {
 }
 
 fn base64_encode(input: &str) -> String {
+    base64_encode_bytes(input.as_bytes())
+}
+
+fn base64_encode_bytes(bytes: &[u8]) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = input.as_bytes();
     let mut result = String::new();
     
     for chunk in bytes.chunks(3) {
