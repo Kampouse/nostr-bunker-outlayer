@@ -1,5 +1,6 @@
 /**
  * NEAR + Nostr Bunker - Cloudflare Worker Bridge
+ * Multi-user: Any NEAR account can derive their Nostr identity
  */
 
 export interface Env {
@@ -50,7 +51,6 @@ async function callOutlayer(env: Env, method: string, params: any[]): Promise<an
     throw new Error(data.error || 'OutLayer execution failed');
   }
   
-  // output is already an object (not a string)
   if (data.output.error) {
     throw new Error(data.output.error);
   }
@@ -63,7 +63,7 @@ export default {
     const url = new URL(request.url);
     const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
-    // WebSocket check MUST come first (before path checks)
+    // WebSocket check MUST come first
     if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -90,8 +90,8 @@ export default {
     if (url.pathname === '/' || url.pathname === '/health') {
       return new Response(JSON.stringify({
         status: 'ok',
-        version: '1.3.0',
-        service: 'NEAR + Nostr Bunker',
+        version: '3.0.0',
+        service: 'NEAR + Nostr Bunker (Multi-User)',
         timestamp: new Date().toISOString(),
         endpoints: {
           websocket: `wss://${url.host}`,
@@ -103,109 +103,82 @@ export default {
 
     // API: Get public key
     if (url.pathname === '/api/get_public_key' && request.method === 'POST') {
-      log('info', 'API: get_public_key', { ip: clientIp });
+      const body = await request.json() as any;
+      const accountId = body.account_id || 'kampouse.near';
       try {
-        const pubkey = await callOutlayer(env, 'get_public_key', []);
-        log('info', 'Got pubkey', { pubkey: pubkey.slice(0, 16) + '...' });
+        const pubkey = await callOutlayer(env, 'get_public_key', [accountId]);
         return new Response(JSON.stringify({ pubkey }), { 
           headers: { 'Content-Type': 'application/json' } 
         });
       } catch (e) {
-        log('error', 'get_public_key failed', { error: String(e) });
         return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500,
-          headers: { 'Content-Type': 'application/json' } 
+          status: 500, headers: { 'Content-Type': 'application/json' } 
         });
       }
     }
 
     // API: Get identity
     if (url.pathname === '/api/get_identity' && request.method === 'POST') {
-      log('info', 'API: get_identity', { ip: clientIp });
+      const body = await request.json() as any;
+      const accountId = body.account_id || 'kampouse.near';
       try {
-        const identity = await callOutlayer(env, 'get_identity', []);
-        log('info', 'Got identity', { near: identity.near_account });
+        const identity = await callOutlayer(env, 'get_identity', [accountId]);
         return new Response(JSON.stringify(identity), { 
           headers: { 'Content-Type': 'application/json' } 
         });
       } catch (e) {
-        log('error', 'get_identity failed', { error: String(e) });
         return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500,
-          headers: { 'Content-Type': 'application/json' } 
+          status: 500, headers: { 'Content-Type': 'application/json' } 
         });
       }
     }
 
-    // API: Create identity proof (NIP-39)
-    if (url.pathname === '/api/create_identity_proof' && request.method === 'POST') {
-      log('info', 'API: create_identity_proof', { ip: clientIp });
-      try {
-        const proof = await callOutlayer(env, 'create_identity_proof', []);
-        log('info', 'Created identity proof');
-        return new Response(JSON.stringify(proof), { 
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      } catch (e) {
-        log('error', 'create_identity_proof failed', { error: String(e) });
-        return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500,
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      }
-    }
-
-    // API: Get private key (requires auth - use carefully)
+    // API: Get private key
     if (url.pathname === '/api/get_private_key' && request.method === 'POST') {
-      log('info', 'API: get_private_key', { ip: clientIp });
+      const body = await request.json() as any;
+      const accountId = body.account_id || 'kampouse.near';
+      log('info', 'Private key requested', { account_id: accountId, ip: clientIp });
       try {
-        const result = await callOutlayer(env, 'get_private_key', []);
-        log('info', 'Private key requested');
+        const result = await callOutlayer(env, 'get_private_key', [accountId]);
         return new Response(JSON.stringify(result), { 
           headers: { 'Content-Type': 'application/json' } 
         });
       } catch (e) {
-        log('error', 'get_private_key failed', { error: String(e) });
         return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500,
+          status: 500, headers: { 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
+    // API: Create identity proof
+    if (url.pathname === '/api/create_identity_proof' && request.method === 'POST') {
+      const body = await request.json() as any;
+      const accountId = body.account_id || 'kampouse.near';
+      try {
+        const proof = await callOutlayer(env, 'create_identity_proof', [accountId]);
+        return new Response(JSON.stringify(proof), { 
           headers: { 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: String(e) }), { 
+          status: 500, headers: { 'Content-Type': 'application/json' } 
         });
       }
     }
 
     // API: Sign event
     if (url.pathname === '/api/sign_event' && request.method === 'POST') {
-      log('info', 'API: sign_event', { ip: clientIp });
+      const body = await request.json() as any;
+      const accountId = body.account_id || 'kampouse.near';
+      const event = body.event || body;
       try {
-        const body = await request.json();
-        const signedEvent = await callOutlayer(env, 'sign_event', [body]);
-        log('info', 'Event signed', { eventId: signedEvent.id?.slice(0, 16) });
+        const signedEvent = await callOutlayer(env, 'sign_event', [accountId, event]);
         return new Response(JSON.stringify(signedEvent), { 
           headers: { 'Content-Type': 'application/json' } 
         });
       } catch (e) {
-        log('error', 'sign_event failed', { error: String(e) });
         return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500,
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      }
-    }
-
-    // API: Create session
-    if (url.pathname === '/api/create_session' && request.method === 'POST') {
-      log('info', 'API: create_session', { ip: clientIp });
-      try {
-        const session = await callOutlayer(env, 'create_session', []);
-        log('info', 'Session created');
-        return new Response(JSON.stringify(session), { 
-          headers: { 'Content-Type': 'application/json' } 
-        });
-      } catch (e) {
-        log('error', 'create_session failed', { error: String(e) });
-        return new Response(JSON.stringify({ error: String(e) }), { 
-          status: 500,
-          headers: { 'Content-Type': 'application/json' } 
+          status: 500, headers: { 'Content-Type': 'application/json' } 
         });
       }
     }
@@ -214,7 +187,7 @@ export default {
     if (url.pathname.startsWith('/auth/')) {
       const accountId = url.pathname.split('/')[2] || 'unknown';
       const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize - ${accountId}</title>
-<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea,#764ba2);margin:0}.box{background:#fff;border-radius:20px;padding:40px;max-width:500px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}button{width:100%;padding:16px;background:#007AFF;color:#fff;border:none;border-radius:12px;font-size:18px;cursor:pointer;margin-top:20px}button:disabled{background:#ccc;cursor:not-allowed}button.secondary{background:#34C759;margin-top:10px}#logs{text-align:left;font-size:12px;color:#666;margin-top:20px;max-height:200px;overflow-y:auto;background:#f5f5f5;padding:10px;border-radius:8px}#identity{background:#f0f8ff;padding:15px;border-radius:8px;margin-top:15px;text-align:left;font-size:14px}</style></head>
+<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea,#764ba2);margin:0}.box{background:#fff;border-radius:20px;padding:40px;max-width:500px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}button{width:100%;padding:16px;background:#007AFF;color:#fff;border:none;border-radius:12px;font-size:18px;cursor:pointer;margin-top:20px}button:disabled{background:#ccc;cursor:not-allowed}button.secondary{background:#34C759;margin-top:10px}#logs{text-align:left;font-size:12px;color:#666;margin-top:20px;max-height:200px;overflow-y:auto;background:#f5f5f5;padding:10px;border-radius:8px}</style></head>
 <body><div class="box"><h1>🔐 Authorize Nostr</h1><p>Account: <b>${accountId}</b></p><button id="btn">Login with NEAR</button><button id="proofBtn" class="secondary" style="display:none">Publish Identity Proof</button><div id="identity" style="display:none"></div><div id="keySection" style="display:none;margin-top:20px;padding-top:20px;border-top:1px solid #ddd"><h3>🔑 Export Private Key</h3><p style="font-size:13px;color:#666">For <a href="https://snort.social" target="_blank">snort.social</a> or other clients</p><button id="showKeyBtn" style="background:#FF9500">Show Private Key (⚠️)</button><div id="keyWarning" style="display:none;background:#fff3cd;padding:15px;border-radius:8px;margin:10px 0"><b>⚠️ WARNING</b><br><br>Your private key gives FULL access to your Nostr identity.<br>Never share it or enter it on untrusted websites.<br><br><button id="confirmShowKey" style="background:#dc3545">I understand - Show Key</button></div><div id="keyDisplay" style="display:none"></div></div><p id="status"></p><div id="logs"></div></div></body>
 <script type="module">
 import { NearConnector } from "https://esm.run/@hot-labs/near-connect";
@@ -257,7 +230,6 @@ connector.on("wallet:signIn", async (t) => {
     
     if (data.error) throw new Error(data.error);
     
-    // Show identity info
     identityDiv.innerHTML = '<b>Your Nostr Identity:</b><br>' +
       'npub: <code>' + data.nostr_npub + '</code><br>' +
       'NEAR: <code>' + data.near_account + '</code><br>' +
@@ -265,13 +237,11 @@ connector.on("wallet:signIn", async (t) => {
       '<a href="' + data.verification_url + '" target="_blank">Verify on NEAR Social →</a>';
     identityDiv.style.display = 'block';
     
-    // Show proof button and key section
     proofBtn.style.display = 'block';
     document.getElementById('keySection').style.display = 'block';
     
     status.innerHTML = '<span style="color:green">✓ Authorized!</span>';
     btn.textContent = '✓ Done';
-    
     log('✓ Ready');
   } catch (e) {
     log('✗ Error: ' + e.message);
@@ -297,56 +267,46 @@ btn.onclick = async () => {
 proofBtn.onclick = async () => {
   proofBtn.disabled = true;
   proofBtn.textContent = 'Publishing...';
-  log('→ Creating NIP-39 identity proof...');
+  log('→ Creating identity proof...');
   try {
-    const res = await fetch('/api/create_identity_proof', { method: 'POST' });
+    const res = await fetch('/api/create_identity_proof', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: '${accountId}' })
+    });
     const proof = await res.json();
     log('← Proof created');
     
-    // Sign the event via bunker
-    log('→ Signing event...');
     const signRes = await fetch('/api/sign_event', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(proof)
+      body: JSON.stringify({ account_id: '${accountId}', event: proof })
     });
     const signed = await signRes.json();
     
     if (signed.error) throw new Error(signed.error);
     log('← Event signed');
     
-    // Publish to relays
-    log('→ Publishing to Nostr relays...');
-    const relays = [
-      'wss://nostr-relay-production.up.railway.app',
-      'wss://relay.damus.io',
-      'wss://nos.lol'
-    ];
-    
+    const relays = ['wss://nostr-relay-production.up.railway.app', 'wss://relay.damus.io'];
     let published = 0;
     for (const relay of relays) {
       try {
         const ws = new WebSocket(relay);
-        await new Promise((resolve, reject) => {
+        await new Promise((resolve) => {
           ws.onopen = () => {
             ws.send(JSON.stringify(['EVENT', signed]));
             log('  → Published to ' + relay);
             published++;
             setTimeout(() => { ws.close(); resolve(true); }, 500);
           };
-          ws.onerror = () => resolve(false);
           setTimeout(() => { ws.close(); resolve(false); }, 2000);
         });
-      } catch (e) {
-        log('  ✗ Failed: ' + relay);
-      }
+      } catch (e) {}
     }
     
-    status.innerHTML = '<span style="color:green">✓ Identity published to ' + published + ' relays!<br>Your NEAR ↔ Nostr link is now verifiable.</span>';
+    status.innerHTML = '<span style="color:green">✓ Published to ' + published + ' relays!</span>';
     proofBtn.textContent = '✓ Published';
     proofBtn.style.background = '#34C759';
-    
-    log('✓ Done - published to ' + published + ' relays');
   } catch (e) {
     log('✗ Error: ' + e.message);
     proofBtn.disabled = false;
@@ -354,12 +314,11 @@ proofBtn.onclick = async () => {
   }
 };
 
-// Show private key button
 const showKeyBtn = document.getElementById('showKeyBtn');
 const keyWarning = document.getElementById('keyWarning');
 const keyDisplay = document.getElementById('keyDisplay');
 
-showKeyBtn.onclick = async () => {
+showKeyBtn.onclick = () => {
   keyWarning.style.display = 'block';
   showKeyBtn.style.display = 'none';
 };
@@ -369,11 +328,14 @@ document.getElementById('confirmShowKey').onclick = async () => {
   log('→ Getting private key...');
   
   try {
-    const res = await fetch('/api/get_private_key', { method: 'POST' });
+    const res = await fetch('/api/get_private_key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: '${accountId}' })
+    });
     const data = await res.json();
     
     if (data.error) throw new Error(data.error);
-    
     log('✓ Private key retrieved');
     
     keyDisplay.innerHTML = 
@@ -381,11 +343,9 @@ document.getElementById('confirmShowKey').onclick = async () => {
       '<b>⚠️ PRIVATE KEY - NEVER SHARE!</b><br><br>' +
       '<b>nsec:</b><br><code style="word-break:break-all;font-size:14px;background:#fff;padding:5px;display:block">' + data.nsec + '</code><br>' +
       '<b>Hex:</b><br><code style="word-break:break-all;font-size:12px;background:#fff;padding:5px;display:block">' + data.private_key + '</code><br>' +
-      '<b style="color:red">⚠️ Anyone with this key can sign as you. Keep it secret!</b>' +
-      '</div>' +
-      '<p style="font-size:13px;color:#666">Copy this key and store it securely. Never share it with anyone or enter it on untrusted sites.</p>';
+      '<b style="color:red">⚠️ Anyone with this key can sign as you!</b>' +
+      '</div>';
     keyDisplay.style.display = 'block';
-    
   } catch (e) {
     log('✗ Error: ' + e.message);
     keyDisplay.innerHTML = '<span style="color:red">Error: ' + e.message + '</span>';
