@@ -1,5 +1,7 @@
 use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
+use k256::ecdsa::SigningKey;
 
 #[derive(Deserialize)]
 struct Request {
@@ -15,17 +17,26 @@ struct Response {
     error: Option<String>,
 }
 
+// Derive valid secp256k1 public key from NEAR account
 fn derive_pubkey(account_id: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    account_id.hash(&mut hasher);
-    format!("{:016x}{:016x}{:016x}{:016x}", 
-        hasher.finish(), hasher.finish(), hasher.finish(), hasher.finish())
-}
-
-fn hex_to_npub(hex: &str) -> String {
-    format!("npub1{}", &hex[..32])
+    // Use SHA-256 to derive a 32-byte private key seed
+    let data = format!("nostr-bunker:{}:v1", account_id);
+    let mut hasher = Sha256::new();
+    hasher.update(data.as_bytes());
+    let seed = hasher.finalize();
+    
+    // Create signing key (private key) from seed
+    let signing_key = SigningKey::from_bytes((&seed[..]).into()).unwrap();
+    
+    // Get verifying key (public key)
+    let verifying_key = signing_key.verifying_key();
+    
+    // Encode as compressed point (33 bytes), then take x-coordinate (32 bytes)
+    let encoded = verifying_key.to_encoded_point(true);
+    let bytes = encoded.as_bytes();
+    
+    // For Nostr, pubkey is the x-coordinate (skip the 0x02/0x03 prefix byte)
+    hex::encode(&bytes[1..33])
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ping" => Response {
             id: request.id,
             result: Some(serde_json::json!({
-                "version": "1.2.0",
+                "version": "1.4.0",
                 "methods": ["ping", "get_public_key", "get_identity", "create_identity_proof", "sign_event", "create_session"]
             })),
             error: None,
@@ -57,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             result: Some(serde_json::json!({
                 "near_account": near_account,
                 "nostr_pubkey": pubkey,
-                "nostr_npub": hex_to_npub(&pubkey),
+                "nostr_npub": format!("npub1{}", &pubkey[..58]),
                 "verification_url": format!("https://near.social/#/kampouse.near")
             })),
             error: None,
@@ -107,13 +118,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let tags = event["tags"].as_array().cloned().unwrap_or_default();
                 let content = event["content"].as_str().unwrap_or("");
                 
-                let serialized = serde_json::to_string(&serde_json::json!([0, pk, created_at, kind, tags, content]))?;
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                serialized.hash(&mut hasher);
-                let event_id = format!("{:064x}", hasher.finish());
-                let sig = format!("sig_{}_{}", &event_id[..32], &pk[..32]);
+                // NIP-01 serialization for event ID
+                let serialized = serde_json::to_string(&serde_json::json!([0, pk, created_at, kind, &tags, content]))?;
+                let mut hasher = Sha256::new();
+                hasher.update(serialized.as_bytes());
+                let event_id = hex::encode(hasher.finalize());
+                
+                // Placeholder signature (real impl needs proper signing)
+                let sig = format!("{}{}", &event_id, "0".repeat(64));
                 
                 Response {
                     id: request.id,
