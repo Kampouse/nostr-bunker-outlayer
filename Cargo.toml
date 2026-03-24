@@ -5,8 +5,9 @@ edition = "2021"
 authors = ["Kampouse"]
 description = "NEAR + Nostr bunker using OutLayer TEE"
 
-[lib]
-crate-type = ["cdylib"]
+[[bin]]
+name = "nostr-bunker-outlayer"
+path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -14,10 +15,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 hex = "0.4"
 
-[dependencies.wit-bindgen]
-version = "0.36"
-features = ["macros"]
-
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = true
+strip = true
