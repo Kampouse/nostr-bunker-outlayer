@@ -247,7 +247,11 @@ connector.on("wallet:signIn", async (t) => {
   
   log('→ Getting identity...');
   try {
-    const res = await fetch('/api/get_identity', { method: 'POST' });
+    const res = await fetch('/api/get_identity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: address })
+    });
     const data = await res.json();
     log('← Identity loaded');
     

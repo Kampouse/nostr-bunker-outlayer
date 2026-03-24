@@ -17,7 +17,7 @@ struct Response {
     error: Option<String>,
 }
 
-// Derive valid secp256k1 Schnorr keypair from NEAR account
+// Derive keypair from any NEAR account
 fn derive_keypair(account_id: &str) -> (String, SigningKey) {
     let data = format!("nostr-bunker:{}:v2", account_id);
     let mut hasher = Sha256::new();
@@ -31,27 +31,25 @@ fn derive_keypair(account_id: &str) -> (String, SigningKey) {
     (pubkey_hex, signing_key)
 }
 
-fn derive_pubkey(account_id: &str) -> String {
-    let (pubkey, _) = derive_keypair(account_id);
-    pubkey
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
     let request: Request = serde_json::from_str(&input)?;
     
-    let near_account = std::env::var("NEAR_SENDER_ID")
-        .or_else(|_| std::env::var("OUTLAYER_PROJECT_OWNER"))
-        .unwrap_or_else(|_| "kampouse.near".to_string());
-    let pubkey = derive_pubkey(&near_account);
+    // Get account_id from first param (all methods require it now)
+    let account_id = request.params.get(0)
+        .and_then(|p| p.as_str())
+        .unwrap_or("kampouse.near");
+    
+    let (pubkey, _) = derive_keypair(account_id);
     
     let response = match request.method.as_str() {
         "ping" => Response {
             id: request.id,
             result: Some(serde_json::json!({
-                "version": "2.1.0",
-                "methods": ["ping", "get_public_key", "get_identity", "get_private_key", "create_identity_proof", "sign_event", "create_session"]
+                "version": "3.0.0",
+                "methods": ["ping", "get_public_key", "get_identity", "get_private_key", "create_identity_proof", "sign_event", "create_session"],
+                "multi_user": true
             })),
             error: None,
         },
@@ -65,19 +63,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "get_identity" => Response {
             id: request.id,
             result: Some(serde_json::json!({
-                "near_account": near_account,
+                "near_account": account_id,
                 "nostr_pubkey": pubkey,
                 "nostr_npub": format!("npub1{}", &pubkey[..58]),
                 "bunker_url": format!("bunker://{}?relay=wss://nostr-bunker-bridge.kj95hgdgnn.workers.dev", pubkey),
                 "websocket_url": "wss://nostr-bunker-bridge.kj95hgdgnn.workers.dev",
-                "verification_url": format!("https://near.social/#/kampouse.near")
+                "verification_url": format!("https://near.social/#/{}", account_id)
             })),
             error: None,
         },
         
         "get_private_key" => {
-            // Derive private key (same seed as pubkey)
-            let (_, signing_key) = derive_keypair(&near_account);
+            let (_, signing_key) = derive_keypair(account_id);
             let privkey_bytes = signing_key.to_bytes();
             let privkey_hex = hex::encode(privkey_bytes);
             
@@ -103,13 +100,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "created_at": created_at,
                     "kind": 0,
                     "tags": [
-                        ["i", &near_account, "NEAR"],
-                        ["proxy", format!("bunker://{}@nostr-bunker-bridge.kj95hgdgnn.workers.dev", near_account)]
+                        ["i", account_id, "NEAR"],
+                        ["proxy", format!("bunker://{}@nostr-bunker-bridge.kj95hgdgnn.workers.dev", account_id)]
                     ],
                     "content": serde_json::to_string(&serde_json::json!({
-                        "name": near_account.split('.').next().unwrap_or(&near_account),
-                        "about": format!("NEAR account: {}", near_account),
-                        "picture": format!("https://near.social/img/{}", near_account)
+                        "name": account_id.split('.').next().unwrap_or(account_id),
+                        "about": format!("NEAR account: {}", account_id),
+                        "picture": format!("https://near.social/img/{}", account_id)
                     })).unwrap()
                 })),
                 error: None,
@@ -123,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 id: request.id,
                 result: Some(serde_json::json!({
                     "token": format!("sess_{}", &pubkey[..16]),
-                    "account_id": near_account,
+                    "account_id": account_id,
                     "pubkey": pubkey,
                     "created_at": now,
                     "expires_at": now + 86400 * 30
@@ -133,7 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         
         "sign_event" => {
-            if let Some(event) = request.params.get(0) {
+            // params: [account_id, event]
+            if let Some(event) = request.params.get(1) {
                 let pk = event["pubkey"].as_str().unwrap_or(&pubkey);
                 let created_at = event["created_at"].as_u64().unwrap_or(0);
                 let kind = event["kind"].as_u64().unwrap_or(0) as u16;
@@ -149,7 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let event_id_bytes = hasher.finalize();
                 let event_id = hex::encode(&event_id_bytes);
                 
-                let (_, signing_key) = derive_keypair(&near_account);
+                let (_, signing_key) = derive_keypair(account_id);
                 let signature: Signature = signing_key.sign(&event_id_bytes);
                 let sig_hex = hex::encode(signature.to_bytes());
                 
