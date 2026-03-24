@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
-use k256::ecdsa::SigningKey;
+use k256::schnorr::{SigningKey, Signature, signature::Signer};
 
 #[derive(Deserialize)]
 struct Request {
@@ -17,26 +17,28 @@ struct Response {
     error: Option<String>,
 }
 
-// Derive valid secp256k1 public key from NEAR account
-fn derive_pubkey(account_id: &str) -> String {
-    // Use SHA-256 to derive a 32-byte private key seed
-    let data = format!("nostr-bunker:{}:v1", account_id);
+// Derive valid secp256k1 Schnorr keypair from NEAR account
+fn derive_keypair(account_id: &str) -> (String, SigningKey) {
+    // Use SHA-256 to derive a 32-byte seed
+    let data = format!("nostr-bunker:{}:v2", account_id);
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
     let seed = hasher.finalize();
     
-    // Create signing key (private key) from seed
+    // Create Schnorr signing key from seed
     let signing_key = SigningKey::from_bytes((&seed[..]).into()).unwrap();
     
-    // Get verifying key (public key)
-    let verifying_key = signing_key.verifying_key();
+    // Get public key (32 bytes for Schnorr/x-only)
+    let pubkey_bytes = signing_key.verifying_key().to_bytes();
+    let pubkey_hex = hex::encode(pubkey_bytes);
     
-    // Encode as compressed point (33 bytes), then take x-coordinate (32 bytes)
-    let encoded = verifying_key.to_encoded_point(true);
-    let bytes = encoded.as_bytes();
-    
-    // For Nostr, pubkey is the x-coordinate (skip the 0x02/0x03 prefix byte)
-    hex::encode(&bytes[1..33])
+    (pubkey_hex, signing_key)
+}
+
+// Derive just the pubkey
+fn derive_pubkey(account_id: &str) -> String {
+    let (pubkey, _) = derive_keypair(account_id);
+    pubkey
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ping" => Response {
             id: request.id,
             result: Some(serde_json::json!({
-                "version": "1.4.0",
+                "version": "2.0.0",
                 "methods": ["ping", "get_public_key", "get_identity", "create_identity_proof", "sign_event", "create_session"]
             })),
             error: None,
@@ -76,22 +78,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "create_identity_proof" => {
             let created_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?.as_secs();
+            
+            let event = serde_json::json!({
+                "pubkey": pubkey,
+                "created_at": created_at,
+                "kind": 0,
+                "tags": [
+                    ["i", &near_account, "NEAR"],
+                    ["proxy", format!("bunker://{}@nostr-bunker-bridge.kj95hgdgnn.workers.dev", near_account)]
+                ],
+                "content": serde_json::to_string(&serde_json::json!({
+                    "name": near_account.split('.').next().unwrap_or(&near_account),
+                    "about": format!("NEAR account: {}", near_account),
+                    "picture": format!("https://near.social/img/{}", near_account)
+                })).unwrap()
+            });
+            
             Response {
                 id: request.id,
-                result: Some(serde_json::json!({
-                    "pubkey": pubkey,
-                    "created_at": created_at,
-                    "kind": 0,
-                    "tags": [
-                        ["i", &near_account, "NEAR"],
-                        ["proxy", format!("bunker://{}@nostr-bunker-bridge.kj95hgdgnn.workers.dev", near_account)]
-                    ],
-                    "content": serde_json::to_string(&serde_json::json!({
-                        "name": near_account.split('.').next().unwrap_or(&near_account),
-                        "about": format!("NEAR account: {}", near_account),
-                        "picture": format!("https://near.social/img/{}", near_account)
-                    })).unwrap()
-                })),
+                result: Some(event),
                 error: None,
             }
         },
@@ -118,25 +123,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let tags = event["tags"].as_array().cloned().unwrap_or_default();
                 let content = event["content"].as_str().unwrap_or("");
                 
-                // NIP-01 serialization for event ID
-                let serialized = serde_json::to_string(&serde_json::json!([0, pk, created_at, kind, &tags, content]))?;
+                // NIP-01 serialization: [0, pubkey, created_at, kind, tags, content]
+                let serialized = serde_json::to_string(&serde_json::json!([
+                    0, pk, created_at, kind, &tags, content
+                ]))?;
+                
+                // Event ID = SHA256 of serialized
                 let mut hasher = Sha256::new();
                 hasher.update(serialized.as_bytes());
-                let event_id = hex::encode(hasher.finalize());
+                let event_id_bytes = hasher.finalize();
+                let event_id = hex::encode(&event_id_bytes);
                 
-                // Placeholder signature (real impl needs proper signing)
-                let sig = format!("{}{}", &event_id, "0".repeat(64));
+                // Sign with Schnorr (BIP-340)
+                let (_, signing_key) = derive_keypair(&near_account);
+                let signature: Signature = signing_key.sign(&event_id_bytes);
+                let sig_hex = hex::encode(signature.to_bytes());
                 
                 Response {
                     id: request.id,
                     result: Some(serde_json::json!({
-                        "id": event_id, "pubkey": pk, "created_at": created_at,
-                        "kind": kind, "tags": tags, "content": content, "sig": sig
+                        "id": event_id,
+                        "pubkey": pk,
+                        "created_at": created_at,
+                        "kind": kind,
+                        "tags": tags,
+                        "content": content,
+                        "sig": sig_hex
                     })),
                     error: None,
                 }
             } else {
-                Response { id: request.id, result: None, error: Some("Missing event".to_string()) }
+                Response { 
+                    id: request.id, 
+                    result: None, 
+                    error: Some("Missing event parameter".to_string()) 
+                }
             }
         },
         _ => Response {
