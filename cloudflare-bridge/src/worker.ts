@@ -216,6 +216,7 @@ connector.on("wallet:signIn", async (t) => {
     identityDiv.innerHTML = '<b>Your Nostr Identity:</b><br>' +
       'npub: <code>' + data.nostr_npub + '</code><br>' +
       'NEAR: <code>' + data.near_account + '</code><br>' +
+      '<b>Bunker URL:</b><br><code style="font-size:11px;word-break:break-all">' + data.bunker_url + '</code><br>' +
       '<a href="' + data.verification_url + '" target="_blank">Verify on NEAR Social →</a>';
     identityDiv.style.display = 'block';
     

@@ -71,6 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "near_account": near_account,
                 "nostr_pubkey": pubkey,
                 "nostr_npub": format!("npub1{}", &pubkey[..58]),
+                "bunker_url": format!("bunker://{}?relay=wss://nostr-relay-production.up.railway.app", pubkey),
+                "websocket_url": "wss://nostr-bunker-bridge.kj95hgdgnn.workers.dev",
                 "verification_url": format!("https://near.social/#/kampouse.near")
             })),
             error: None,
