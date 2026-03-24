@@ -1,0 +1,14 @@
+/Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/deps/serde-08e2f6d8e9d13350.d: /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/build/serde-6e91ee82f550f658/out/private.rs
+
+/Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/deps/libserde-08e2f6d8e9d13350.rlib: /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/build/serde-6e91ee82f550f658/out/private.rs
+
+/Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/deps/libserde-08e2f6d8e9d13350.rmeta: /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/build/serde-6e91ee82f550f658/out/private.rs
+
+/Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/asil/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/build/serde-6e91ee82f550f658/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/asil/.openclaw/workspace/nostr-bunker-outlayer/target/wasm32-wasip1/release/build/serde-6e91ee82f550f658/out
