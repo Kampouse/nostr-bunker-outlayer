@@ -1,0 +1,11 @@
+name = "nostr-bunker-bridge"
+main = "src/worker.ts"
+compatibility_date = "2024-01-01"
+logpush = true
+
+[vars]
+RATE_LIMIT_MAX = "100"
+RATE_LIMIT_WINDOW = "60"
+
+[observability.logs]
+enabled = true

@@ -1,7 +1,5 @@
 /**
  * NEAR + Nostr Bunker - Cloudflare Worker Bridge
- * 
- * Security: Email only sent through authenticated sign_event with ["email", "..."] tag
  */
 
 export interface Env {
@@ -20,62 +18,44 @@ interface NIP46Request {
   params: any[];
 }
 
-interface NIP46Response {
-  id: number | string;
-  result?: any;
+interface OutlayerResponse {
+  call_id: string;
+  status: string;
+  output?: {
+    id: number;
+    result?: any;
+    error?: string;
+  };
   error?: string;
 }
 
-interface Metrics {
-  requestsTotal: number;
-  requestsSuccessful: number;
-  requestsFailed: number;
-  wsConnections: number;
-  rateLimitedRequests: number;
-  averageResponseTime: number;
-  emailsSent: number;
-}
-
-const rateLimitStore = new Map<string, { count: number; resetTime: number }>();
-const metrics: Metrics = {
-  requestsTotal: 0,
-  requestsSuccessful: 0,
-  requestsFailed: 0,
-  wsConnections: 0,
-  rateLimitedRequests: 0,
-  averageResponseTime: 0,
-  emailsSent: 0,
-};
-const responseTimes: number[] = [];
-
-function log(level: 'info' | 'warn' | 'error', message: string, data?: Record<string, any>) {
+function log(level: string, message: string, data?: any) {
   console.log(JSON.stringify({ level, message, ...data, timestamp: new Date().toISOString() }));
 }
 
-function checkRateLimit(clientIp: string, max: number, windowSec: number): { allowed: boolean; retryAfter: number } {
-  const now = Date.now();
-  const entry = rateLimitStore.get(clientIp);
-  if (!entry || now > entry.resetTime) {
-    rateLimitStore.set(clientIp, { count: 1, resetTime: now + windowSec * 1000 });
-    return { allowed: true, retryAfter: 0 };
+async function callOutlayer(env: Env, method: string, params: any[]): Promise<any> {
+  const response = await fetch(env.OUTLAYER_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Payment-Key': env.PAYMENT_KEY },
+    body: JSON.stringify({ input: { id: 1, method, params } }),
+  });
+  
+  if (!response.ok) {
+    throw new Error(`OutLayer HTTP ${response.status}`);
   }
-  if (entry.count >= max) return { allowed: false, retryAfter: Math.ceil((entry.resetTime - now) / 1000) };
-  entry.count++;
-  return { allowed: true, retryAfter: 0 };
-}
-
-async function sendEmail(env: Env, to: string, subject: string, body: string): Promise<{ success: boolean; error?: string }> {
-  try {
-    const res = await fetch(env.EMAIL_API_URL || DEFAULT_EMAIL_API, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Payment-Key': env.PAYMENT_KEY },
-      body: JSON.stringify({ input: { action: 'send_email_plaintext', to, subject, body } }),
-    });
-    const data = await res.json() as any;
-    return res.ok && data.status === 'completed' ? { success: true } : { success: false, error: data.output?.error || 'Unknown error' };
-  } catch (e) {
-    return { success: false, error: String(e) };
+  
+  const data = await response.json() as any;
+  
+  if (data.status !== 'completed' || !data.output) {
+    throw new Error(data.error || 'OutLayer execution failed');
   }
+  
+  // output is already an object (not a string)
+  if (data.output.error) {
+    throw new Error(data.output.error);
+  }
+  
+  return data.output.result;
 }
 
 export default {
@@ -83,98 +63,157 @@ export default {
     const url = new URL(request.url);
     const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
-    // WebSocket
+    // Health check
+    if (url.pathname === '/' || url.pathname === '/health') {
+      return new Response(JSON.stringify({
+        status: 'ok',
+        version: '1.3.0',
+        service: 'NEAR + Nostr Bunker',
+        timestamp: new Date().toISOString(),
+        endpoints: {
+          websocket: `wss://${url.host}`,
+          auth: `https://${url.host}/auth/{account_id}`,
+          api: `https://${url.host}/api/{method}`
+        }
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // API: Get public key
+    if (url.pathname === '/api/get_public_key' && request.method === 'POST') {
+      log('info', 'API: get_public_key', { ip: clientIp });
+      try {
+        const pubkey = await callOutlayer(env, 'get_public_key', []);
+        log('info', 'Got pubkey', { pubkey: pubkey.slice(0, 16) + '...' });
+        return new Response(JSON.stringify({ pubkey }), { 
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        log('error', 'get_public_key failed', { error: String(e) });
+        return new Response(JSON.stringify({ error: String(e) }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
+    // API: Create session
+    if (url.pathname === '/api/create_session' && request.method === 'POST') {
+      log('info', 'API: create_session', { ip: clientIp });
+      try {
+        const session = await callOutlayer(env, 'create_session', []);
+        log('info', 'Session created');
+        return new Response(JSON.stringify(session), { 
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      } catch (e) {
+        log('error', 'create_session failed', { error: String(e) });
+        return new Response(JSON.stringify({ error: String(e) }), { 
+          status: 500,
+          headers: { 'Content-Type': 'application/json' } 
+        });
+      }
+    }
+
+    // Auth page
+    if (url.pathname.startsWith('/auth/')) {
+      const accountId = url.pathname.split('/')[2] || 'unknown';
+      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize - ${accountId}</title>
+<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:linear-gradient(135deg,#667eea,#764ba2);margin:0}.box{background:#fff;border-radius:20px;padding:40px;max-width:450px;width:90%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}button{width:100%;padding:16px;background:#007AFF;color:#fff;border:none;border-radius:12px;font-size:18px;cursor:pointer;margin-top:20px}button:disabled{background:#ccc;cursor:not-allowed}#logs{text-align:left;font-size:12px;color:#666;margin-top:20px;max-height:200px;overflow-y:auto;background:#f5f5f5;padding:10px;border-radius:8px}</style></head>
+<body><div class="box"><h1>🔐 Authorize Nostr</h1><p>Account: <b>${accountId}</b></p><button id="btn">Login with NEAR</button><p id="status"></p><div id="logs"></div></div></body>
+<script type="module">
+import { NearConnector } from "https://esm.run/@hot-labs/near-connect";
+
+const status = document.getElementById('status');
+const btn = document.getElementById('btn');
+const logs = document.getElementById('logs');
+
+function log(msg) {
+  const line = document.createElement('div');
+  line.textContent = new Date().toLocaleTimeString() + ' - ' + msg;
+  logs.appendChild(line);
+  console.log(msg);
+}
+
+log('Page loaded');
+
+const connector = new NearConnector();
+
+connector.on("wallet:signIn", async (t) => {
+  const address = t.accounts[0].accountId;
+  log('✓ Wallet: ' + address);
+  
+  if (address !== '${accountId}') {
+    status.innerHTML = '<span style="color:red">Wrong account: ' + address + '</span>';
+    btn.disabled = false;
+    return;
+  }
+  
+  log('→ Getting pubkey...');
+  try {
+    const res = await fetch('/api/get_public_key', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    log('← Status: ' + res.status);
+    const data = await res.json();
+    log('← Data: ' + JSON.stringify(data));
+    
+    if (data.error) throw new Error(data.error);
+    
+    log('✓ Pubkey: ' + data.pubkey.slice(0, 16) + '...');
+    
+    log('→ Creating session...');
+    const sres = await fetch('/api/create_session', { method: 'POST' });
+    const sdata = await sres.json();
+    log('← Session: ' + JSON.stringify(sdata));
+    
+    status.innerHTML = '<span style="color:green">✓ Authorized!<br>Pubkey: ' + data.pubkey.slice(0, 20) + '...</span>';
+    btn.textContent = '✓ Done';
+    
+    setTimeout(() => window.close(), 2000);
+  } catch (e) {
+    log('✗ Error: ' + e.message);
+    status.innerHTML = '<span style="color:red">Error: ' + e.message + '</span>';
+    btn.disabled = false;
+    btn.textContent = 'Login with NEAR';
+  }
+});
+
+btn.onclick = async () => {
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+  log('→ Opening wallet...');
+  try {
+    await connector.connect();
+  } catch (e) {
+    log('✗ Error: ' + e.message);
+    status.innerHTML = '<span style="color:red">Error: ' + e.message + '</span>';
+    btn.disabled = false;
+    btn.textContent = 'Login with NEAR';
+  }
+};
+</script></html>`;
+      return new Response(html, { headers: { 'Content-Type': 'text/html' } });
+    }
+
+    // WebSocket for NIP-46
     if (request.headers.get('Upgrade') === 'websocket') {
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       server.accept();
-      metrics.wsConnections++;
-      log('info', 'WebSocket connected', { ip: clientIp });
-
+      
       server.addEventListener('message', async (event: MessageEvent) => {
-        const startTime = Date.now();
         try {
           const msg: NIP46Request = JSON.parse(event.data as string);
-          if (!msg.method) throw new Error('Missing method');
-
-          log('info', 'Request', { method: msg.method, ip: clientIp });
-
-          // Forward to OutLayer
-          const response = await fetch(env.OUTLAYER_API_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Payment-Key': env.PAYMENT_KEY },
-            body: JSON.stringify({ input: msg }),
-          });
-          if (!response.ok) throw new Error('OutLayer error: ' + response.status);
-          const result: NIP46Response = await response.json();
-
-          const duration = Date.now() - startTime;
-          responseTimes.push(duration);
-          metrics.requestsTotal++;
-          metrics.requestsSuccessful++;
-          log('info', 'Success', { method: msg.method, duration, ip: clientIp });
-          server.send(JSON.stringify(result));
-
-          // If sign_event with email tag, send email
-          if (msg.method === 'sign_event' && result.result && msg.params[0]?.tags) {
-            const emailTag = msg.params[0].tags.find((t: string[]) => t[0] === 'email');
-            if (emailTag) {
-              const event = msg.params[0];
-              const subject = event.tags.find((t: string[]) => t[0] === 'subject')?.[1] || 'Message from Nostr';
-              const body = event.content + '\n\n---\nSigned by: ' + event.pubkey?.slice(0, 16) + '...';
-              const emailResult = await sendEmail(env, emailTag[1], subject, body);
-              if (emailResult.success) {
-                metrics.emailsSent++;
-                log('info', 'Email sent', { to: emailTag[1], ip: clientIp });
-              } else {
-                log('warn', 'Email failed', { error: emailResult.error, ip: clientIp });
-              }
-            }
-          }
+          const result = await callOutlayer(env, msg.method, msg.params);
+          server.send(JSON.stringify({ id: msg.id, result, error: null }));
         } catch (e) {
-          metrics.requestsTotal++;
-          metrics.requestsFailed++;
-          log('error', 'Error', { error: String(e), ip: clientIp });
-          server.send(JSON.stringify({ id: 'error', error: String(e) }));
+          server.send(JSON.stringify({ id: null, result: null, error: String(e) }));
         }
       });
-
-      server.addEventListener('close', () => {
-        metrics.wsConnections--;
-        log('info', 'WebSocket closed', { ip: clientIp });
-      });
-
+      
       return new Response(null, { status: 101, webSocket: client });
-    }
-
-    // Rate limiting for HTTP
-    const rateLimit = checkRateLimit(clientIp, parseInt(env.RATE_LIMIT_MAX || '100'), parseInt(env.RATE_LIMIT_WINDOW || '60'));
-    if (!rateLimit.allowed) {
-      metrics.rateLimitedRequests++;
-      return new Response(JSON.stringify({ error: 'Rate limit exceeded', retryAfter: rateLimit.retryAfter }), {
-        status: 429,
-        headers: { 'Content-Type': 'application/json', 'Retry-After': String(rateLimit.retryAfter) },
-      });
-    }
-
-    // Health
-    if (url.pathname === '/' || url.pathname === '/health') {
-      return new Response(JSON.stringify({
-        status: 'ok',
-        version: '1.2.0',
-        service: 'NEAR + Nostr Bunker',
-        timestamp: new Date().toISOString(),
-        endpoints: { websocket: 'wss://' + url.host, auth: 'https://' + url.host + '/auth/{account_id}' },
-        note: 'Email only via authenticated sign_event with ["email", "..."] tag',
-      }), { headers: { 'Content-Type': 'application/json' } });
-    }
-
-    // Metrics
-    if (url.pathname === '/metrics') {
-      const avgTime = responseTimes.length ? Math.round(responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length) : 0;
-      return new Response(JSON.stringify({ metrics: { ...metrics, averageResponseTime: avgTime } }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
     }
 
     return new Response('Not Found', { status: 404 });
